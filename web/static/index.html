@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="__CSP__">
+<title>HFO Detector</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>HFO Detector</h1>
+  <p class="sub">Automatic HFO detection as in HFOApp: EDF in, HFOApp's two text files out for each frequency band.</p>
+  <p class="local">🔒 Recordings are processed on this computer. They are never uploaded.</p>
+  <p id="fileWarning" class="warn" hidden>This page was opened as a file. Browsers do not allow it to run the analysis that way: open it from its web address instead (for a local copy: <code>python3 web/build.py --serve</code>, then <a href="http://localhost:8000">http://localhost:8000</a>).</p>
+</header>
+
+<main>
+  <section>
+    <h2><span class="n">1</span> Recordings</h2>
+    <label id="drop" class="drop">
+      <input id="pick" type="file" accept=".edf,.EDF" multiple hidden>
+      <strong>Drop .edf files here</strong> or <u>choose files</u>
+    </label>
+    <table id="files" hidden>
+      <thead><tr><th>File</th><th>Size</th><th>Length</th><th>Channels</th><th>Status</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span> Algorithm and parameters</h2>
+    <form id="cfg" autocomplete="off">
+      <fieldset>
+        <legend>Detector</legend>
+        <label>Algorithm
+          <select name="detector">
+            <option value="hfoapp_hilbert">HFOApp Hilbert</option>
+            <option value="ripplelab_hilbert">RippleLab Hilbert</option>
+            <option disabled>STE (not available yet)</option>
+            <option disabled>SLL (not available yet)</option>
+            <option disabled>MNI (not available yet)</option>
+          </select>
+        </label>
+        <label>Filter
+          <select name="bp_type"><option value="fir">FIR</option><option value="iir">IIR (Butterworth)</option></select>
+        </label>
+        <label>Epoch
+          <select name="epoch_mode"><option value="whole">whole recording</option><option value="sec">seconds…</option></select>
+        </label>
+        <label class="epoch-sec">Epoch (s)<input name="epoch_sec" type="number" min="0" step="any"></label>
+        <p class="hint">Epoch = window for the mean and SD of the background. 600 s is recommended (HFOApp's default is the whole recording).</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Bands to analyze <small>each band gives its own two files</small></legend>
+        <div class="scroll">
+          <table id="bands">
+            <thead><tr>
+              <th></th><th>Name</th><th>Low (Hz)</th><th>High (Hz)</th><th>Event type</th>
+              <th data-det="hfoapp_hilbert">Onset (SD)</th><th data-det="hfoapp_hilbert">Inclusion (SD)</th>
+              <th data-det="hfoapp_hilbert">Cycles</th>
+              <th data-det="ripplelab_hilbert">SD threshold</th><th data-det="ripplelab_hilbert">Min duration (ms)</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="hint">Onset: where an event starts and ends. Inclusion: how high its peak must be. Cycles: minimum number of oscillations.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend><label class="inline"><input name="notch" type="checkbox"> Notch filter</label></legend>
+        <label>Frequency (Hz)<input name="notch_freq" type="number" step="any"></label>
+        <label>Bandwidth (Hz)<input name="notch_bw" type="number" step="any"></label>
+        <label>Filter
+          <select name="notch_type"><option value="fir">FIR</option><option value="iir">IIR (unstable, see docs)</option></select>
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Channels</legend>
+        <div id="channels" class="channels"><em>All channels. Add a recording to choose.</em></div>
+      </fieldset>
+
+    </form>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span> Output</h2>
+    <div class="row">
+      <span>Save to: <strong id="outName">Downloads folder</strong></span>
+      <button id="outPick" type="button">Choose folder…</button>
+    </div>
+    <p id="outNote" class="note" hidden>This browser cannot write into a chosen folder: the files go to the Downloads folder. Use Chrome or Edge to choose a folder.</p>
+    <div class="row">
+      <button id="start" class="primary" type="button" disabled>Start</button>
+      <button id="cancel" type="button" hidden>Cancel</button>
+      <span id="overall"></span>
+    </div>
+    <p id="engine" class="note">Preparing the analysis engine… (the first time it downloads about 40 MB, then it is kept by the browser)</p>
+    <pre id="log" aria-live="polite"></pre>
+  </section>
+</main>
+
+<footer>
+  <p>Work in progress — a research tool, not a medical device: automatic detections must be reviewed by a person.</p>
+  <p>__GUIDE_LINK__<a href="__SOURCE__" target="_blank" rel="noopener">Source code</a> (GPL-3.0) ·
+     hfo-port __VERSION__, build __BUILD__</p>
+  <p id="versions"></p>
+</footer>
+<script src="app.js"></script>
+</body>
+</html>
