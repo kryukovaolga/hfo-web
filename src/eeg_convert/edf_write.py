@@ -83,7 +83,7 @@ def record_length(n: int, srate: float) -> tuple[int, str]:
 
 def choose_scale(label: str, lsb_unit: float, nominal: int | None, lo: int, hi: int) -> ChannelScale:
     need = max(abs(lo), abs(hi))
-    candidates = ([nominal] if nominal and nominal >= need else []) + list(range(max(need, 1), 32768))
+    candidates = ([nominal] if nominal and need <= nominal <= 32767 else []) + list(range(max(need, 1), 32768))
     for d in candidates:
         x = d * lsb_unit
         s = num8(x)

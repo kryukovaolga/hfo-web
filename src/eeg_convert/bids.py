@@ -85,19 +85,28 @@ def events_sidecar(source_file: str) -> dict:
     }
 
 
+CHANNEL_COLUMNS = ["name", "type", "units", "sampling_frequency", "low_cutoff", "high_cutoff", "status"]
+
+
+def channel_columns(block: Block) -> list[str]:
+    """BIDS channels.tsv columns; `reference` only when the file states the references."""
+    return CHANNEL_COLUMNS + (["reference"] if any(c.reference for c in block.channels) else [])
+
+
 def channel_rows(block: Block, info: EdfInfo) -> list[dict]:
     # type (SEEG / ECOG / EEG) is not in the vendor file: left n/a, to fill in by hand
     return [dict(name=c.label, type=None, units=UNIT, sampling_frequency=f"{block.srate:g}",
-                 low_cutoff=c.highpass_hz, high_cutoff=c.lowpass_hz, status="good")
+                 low_cutoff=c.highpass_hz, high_cutoff=c.lowpass_hz, status="good", reference=c.reference)
             for c in block.channels]
 
 
 def recording_json(rec: Recording, block: Block, info: EdfInfo) -> dict:
-    return {
+    out = {
         "SourceFile": rec.path.name,
         "SourceFormat": rec.format,
+        **({"Group": block.group} if block.group else {}),
         "Block": block.index,
-        "BlocksInSource": len(rec.blocks),
+        "BlocksInSource": sum(b.group == block.group for b in rec.blocks),
         "RecordingStart": block.start.isoformat(timespec="microseconds"),
         "SamplingFrequency": block.srate,
         "Samples": block.n_samples,
@@ -113,7 +122,11 @@ def recording_json(rec: Recording, block: Block, info: EdfInfo) -> dict:
         "Channels": [{"Label": s.label, "Unit": UNIT, "LSB": s.lsb,
                       "DigitalRange": [s.dig_min, s.dig_max], "PhysicalRange": [s.phys_min, s.phys_max],
                       "DataRange": [s.data_min, s.data_max], "ScaleExact": s.exact,
-                      "ScaleRelativeError": s.relative_error}
-                     for s in info.scales],
+                      "ScaleRelativeError": s.relative_error,
+                      **({"Source": c.source} if c.source else {})}
+                     for s, c in zip(info.scales, block.channels)],
         "GeneratedBy": [GENERATED_BY],
     }
+    if block.source:
+        out["Source"] = block.source
+    return out

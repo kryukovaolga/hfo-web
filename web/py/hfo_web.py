@@ -7,11 +7,12 @@ The validated package src/hfo_port is used as is. Browser-specific parts:
   full-length arrays go to the browser's private disk (OPFS) through sync access handles
   opened by worker.js, wrapped by hfo_port.scratch.ScratchArray (same float64 bytes);
 - progress messages for the page;
-- LabChart .adicht files: converted by the validated package src/eeg_convert, the EDF
-  written to the browser's private disk (HandleFile), then analyzed like any EDF.
+- vendor recordings (LabChart .adicht; Neuralynx .ncs folder or .zip, with Persyst .lay
+  comments): converted by src/eeg_convert, the EDF files written to the browser's private
+  disk (HandleFile), then analyzed like any EDF.
 
 Entry points: inspect(), run() and the plan / run_channels / write_results trio, and
-inspect_adicht() / convert_adicht() (worker.js); config_from_yaml() (test/check.mjs).
+inspect_recording() / convert_recording() (worker.js); config_from_yaml() (test/check.mjs).
 """
 
 from __future__ import annotations
@@ -298,8 +299,8 @@ def run(path: str, cfg_json: str, strict: bool, out_dir: str, post, scratch=None
     return _write(_run(path, cfg_json, post, scratch, processing_json), path, strict, out_dir)
 
 
-# ---- LabChart .adicht: convert first, then the EDF goes through the usual path.
-# The file is read in pieces: mmap would copy it whole into WebAssembly memory (4 GB max).
+# ---- vendor recordings: convert first, then each EDF goes through the usual path.
+# .adicht files are read in pieces: mmap would copy them whole into WebAssembly memory (4 GB max).
 
 import eeg_convert.adicht
 
@@ -344,24 +345,39 @@ class HandleFile:
         self.close()
 
 
-def inspect_adicht(path: str) -> str:
-    """Blocks of a .adicht file, from its metadata only (fast)."""
-    from eeg_convert.convert import edf_stem, open_recording
+LOOSE = "loose-files"   # folder name the page uses for .ncs files chosen one by one
+
+
+def _name(rec, name: str) -> str:
+    """Base of the output names: the folder or file the user gave, or for loose Neuralynx
+    files the acquisition folder named in their headers."""
+    if name:
+        return name
+    if rec.format == "neuralynx" and rec.name == LOOSE:
+        return rec.blocks[0].source.get("Session") or "neuralynx"
+    return rec.name
+
+
+def inspect_recording(path: str, name: str = "") -> str:
+    """Blocks (EDF files to be) of a vendor recording (.adicht, Neuralynx folder or .zip)."""
+    from eeg_convert.convert import open_recording
     try:
         with open_recording(path) as rec:
-            n = len(rec.blocks)
-            blocks = [{"edf": f"{edf_stem(path, b.index, n)}.edf", "labels": [c.label for c in b.channels],
+            rec.name = _name(rec, name)
+            blocks = [{"edf": f"{rec.stem(b)}.edf", "group": b.group, "labels": [c.label for c in b.channels],
                        "srate": b.srate, "n_samples": b.n_samples, "duration_s": b.n_samples / b.srate,
                        "start": b.start.isoformat(sep=" ", timespec="seconds"),
                        "n_comments": len(b.comments)} for b in rec.blocks]
+            fmt, out_name = rec.format, rec.name
     except ValueError as e:
         return json.dumps({"blocks": [], "problem": str(e)})
-    return json.dumps({"blocks": blocks, "problem": None if blocks else "no blocks"})
+    return json.dumps({"format": fmt, "name": out_name, "blocks": blocks,
+                       "problem": None if blocks else "no blocks"})
 
 
-def convert_adicht(path: str, handles, out_dir: str, post) -> str:
-    """Convert a .adicht; EDF files to handles (JS object {edf name: sync access handle}),
-    sidecars to out_dir (in-memory FS), returned as text with the EDF names."""
+def convert_recording(path: str, handles, out_dir: str, post, name: str = "") -> str:
+    """Convert a vendor recording; EDF files to handles (JS object {edf name: sync access
+    handle}), sidecars to out_dir (in-memory FS), returned as text with the EDF names."""
     from eeg_convert.convert import convert
     handler = _Relay(post)
     log = logging.getLogger("eeg_convert")
@@ -376,7 +392,7 @@ def convert_adicht(path: str, handles, out_dir: str, post) -> str:
 
     try:
         outputs = convert(path, out_dir, edf_opener=lambda p: HandleFile(getattr(handles, p.name)),
-                          progress=progress)
+                          progress=progress, name=name)
     finally:
         log.removeHandler(handler)
     sidecars = lambda o: [o.events, o.events.with_suffix(".json"), o.channels, o.recording]

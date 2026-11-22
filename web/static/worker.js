@@ -11,7 +11,8 @@ import { loadPyodide, version as PYODIDE_VERSION } from "__PYODIDE_URL__pyodide.
 // Pyodide 314.0.7: Python 3.14, numpy 2.4.6, scipy 1.18.0, PyYAML 6.0.3
 
 const SCRATCH_PREFIX = "hfo-scratch-";
-const CONVERT_PREFIX = "hfo-convert-"; // EDF files converted from .adicht, read by all workers
+const CONVERT_PREFIX = "hfo-convert-"; // EDF files converted from vendor files, read by all workers
+const LOOSE = "loose-files"; // folder for files chosen one by one (same name in hfo_web.py)
 
 let py = null;
 let api = null;
@@ -75,10 +76,25 @@ function withFile(file, fn) {
   }
 }
 
-// .adicht -> one EDF per block in a new folder of the private disk (sync access handles,
-// only available in workers); the page reads them back as File objects. Sidecar tables
-// come back as text.
-async function convertAdicht({ id, file, names }) {
+// A vendor recording: one file (.adicht, .zip) -> its path; several files (a Neuralynx
+// folder) -> mounted together in one folder, whose path is passed (name: the folder the
+// user chose; loose files: LOOSE, then Python names the session from the file headers).
+function withInput(files, folder, fn) {
+  if (files.length === 1) return withFile(files[0], fn);
+  const dir = `/input/${folder || LOOSE}`;
+  py.FS.mkdirTree(dir);
+  py.FS.mount(py.FS.filesystems.WORKERFS, { files }, dir);
+  try {
+    return fn(dir);
+  } finally {
+    py.FS.unmount(dir);
+  }
+}
+
+// Vendor recording -> one EDF per block in a new folder of the private disk (sync access
+// handles, only available in workers); the page reads them back as File objects. Sidecar
+// tables come back as text.
+async function convertRecording({ id, files, folder, name, names }) {
   const root = await navigator.storage.getDirectory();
   const dir = await root.getDirectoryHandle(CONVERT_PREFIX + crypto.randomUUID(), { create: true });
   const handles = {};
@@ -88,7 +104,7 @@ async function convertAdicht({ id, file, names }) {
       handles[name] = await fh.createSyncAccessHandle();
     }
     const post = (s) => self.postMessage({ id, log: JSON.parse(s) });
-    const blocks = JSON.parse(withFile(file, (p) => api.convert_adicht(p, handles, "/converted", post)));
+    const blocks = JSON.parse(withInput(files, folder, (p) => api.convert_recording(p, handles, "/converted", post, name)));
     return { dir: dir.name, blocks };
   } finally {
     for (const h of Object.values(handles)) h.close();
@@ -97,8 +113,8 @@ async function convertAdicht({ id, file, names }) {
 
 const handlers = {
   init: ({ clean }) => init({ clean }),
-  inspectAdicht: ({ file }) => JSON.parse(withFile(file, (p) => api.inspect_adicht(p))),
-  convertAdicht,
+  inspectRecording: ({ files, folder }) => JSON.parse(withInput(files, folder, (p) => api.inspect_recording(p, folder))),
+  convertRecording,
   inspect: ({ file }) => JSON.parse(withFile(file, (p) => api.inspect(p))),
   scratchBytes: ({ n, notch }) => api.scratch_bytes(n, notch),
   plan: ({ file, cfg }) => JSON.parse(withFile(file, (p) => api.plan(p, JSON.stringify(cfg)))),

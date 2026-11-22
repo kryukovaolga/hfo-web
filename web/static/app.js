@@ -1,8 +1,9 @@
 // Page logic: file list, parameter form <-> config dict (same keys as the YAML config of
 // hfo-port), output folder, run queue. All computation happens in worker.js; the channels
 // of a file are shared among several workers (one Python each) to use more CPU cores.
-// LabChart .adicht files are converted first (one EDF per block, on the browser's private
-// disk), then each EDF is analyzed like a recording added by hand.
+// Vendor recordings (LabChart .adicht; Neuralynx sessions: a folder, a .zip, or the .ncs
+// files with Persyst .lay comments) are converted first (one EDF per animal and block, on
+// the browser's private disk), then each EDF is analyzed like a recording added by hand.
 
 const $ = (s) => document.querySelector(s);
 const form = $("#cfg");
@@ -195,56 +196,100 @@ function el(tag, props = {}, children = []) {
   return e;
 }
 const size = (b) => (b > 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${(b / 1e6).toFixed(1)} MB`);
-const isAdicht = (file) => /\.adicht$/i.test(file.name);
 const hms = (s) => {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
   return h ? `${h} h ${m} min` : `${m} min ${Math.round(s % 60)} s`;
 };
+const ext = (name) => (name.match(/\.[^.]*$/)?.[0] ?? "").toLowerCase();
+const SESSION_FILES = [".ncs", ".lay"]; // Neuralynx channels + Persyst layout (comments)
+const FORMATS = { adicht: "LabChart", neuralynx: "Neuralynx" };
 
-async function addFiles(list) {
-  for (const file of list) {
-    if (!/\.(edf|adicht)$/i.test(file.name) || items.some((i) => i.file.name === file.name)) continue;
-    const it = { file, info: null };
+// Files dropped or chosen -> inputs: an EDF, a .adicht or a .zip on its own; the .ncs/.lay
+// files of one folder together (folder: the folder name, "" for files chosen one by one).
+function inputsFrom(entries) {
+  const out = [], sessions = new Map();
+  for (const { file, folder } of entries) {
+    const e = ext(file.name);
+    if ([".edf", ".adicht", ".zip"].includes(e)) out.push({ files: [file], folder: "", kind: e === ".edf" ? "edf" : "vendor" });
+    else if (SESSION_FILES.includes(e)) {
+      if (!sessions.has(folder)) sessions.set(folder, { files: [], folder, kind: "vendor" });
+      sessions.get(folder).files.push(file);
+    }
+  }
+  return [...out, ...[...sessions.values()].filter((s) => s.files.some((f) => ext(f.name) === ".ncs"))];
+}
+
+async function addInputs(entries) {
+  for (const input of inputsFrom(entries)) {
+    const label = input.files.length === 1 ? input.files[0].name : `${input.folder || "Neuralynx files"} (${input.files.length} files)`;
+    if (items.some((i) => i.label === label)) continue;
+    const it = { ...input, label, file: input.kind === "edf" ? input.files[0] : null, info: null };
     it.status = el("td", { textContent: "reading…" });
     const rm = el("button", { type: "button", textContent: "✕", title: "Remove" });
-    it.row = el("tr", {}, [el("td", { textContent: file.name }), el("td", { textContent: size(file.size) }),
-      el("td"), el("td"), it.status, el("td", {}, [rm])]);
+    it.row = el("tr", {}, [el("td", { textContent: label }),
+      el("td", { textContent: size(input.files.reduce((s, f) => s + f.size, 0)) }), el("td"), el("td"), it.status, el("td", {}, [rm])]);
     rm.onclick = () => { items.splice(items.indexOf(it), 1); it.row.remove(); refresh(); };
     items.push(it);
     $("#files tbody").append(it.row);
     $("#files").hidden = false;
     try {
-      it.info = isAdicht(file) ? adichtInfo(file, await call("inspectAdicht", { file })) : await call("inspect", { file });
+      it.info = it.kind === "edf" ? await call("inspect", { file: it.file })
+        : vendorInfo(await call("inspectRecording", { files: it.files, folder: it.folder }));
       it.row.children[2].textContent = hms(it.info.duration_s);
       it.row.children[3].textContent = `${it.info.labels.length} · ${it.info.srate ?? "?"} Hz`;
       setStatus(it, it.info.problem ? `cannot process: ${it.info.problem}` : it.info.note ?? "ready",
         it.info.problem ? "err" : "");
     } catch (e) {
-      setStatus(it, `not a readable ${isAdicht(file) ? "LabChart" : "EDF"} file: ${e.message}`, "err");
+      setStatus(it, `not a readable recording: ${e.message}`, "err");
     }
     refresh();
   }
 }
 function setStatus(it, text, cls = "") { it.status.textContent = text; it.status.className = cls; }
 
-// What the list shows for a .adicht: its blocks become separate EDF files when it runs.
-function adichtInfo(file, a) {
-  const b = a.blocks, first = b[0];
-  const info = { adicht: a, labels: first?.labels ?? [], srate: first?.srate, problem: a.problem,
-    duration_s: b.reduce((s, x) => s + x.duration_s, 0) };
-  const comments = b.reduce((s, x) => s + x.n_comments, 0);
-  info.note = `ready · LabChart${b.length > 1 ? `, ${b.length} blocks` : ""}, ${comments} comments`;
-  if (!info.problem && b.some((x) => x.labels.join() !== first.labels.join() || x.srate !== first.srate)) {
-    info.problem = "blocks with different channels or sampling rates";
-  }
+// What the list shows for a vendor recording: its blocks (per animal) become separate EDF
+// files when it runs. Length: of the longest group; channels: all labels.
+function vendorInfo(v) {
+  const b = v.blocks, groups = [...new Set(b.map((x) => x.group))];
+  const length = (g) => b.filter((x) => x.group === g).reduce((s, x) => s + x.duration_s, 0);
+  const info = { vendor: v, labels: [...new Set(b.flatMap((x) => x.labels))], srate: b[0]?.srate, problem: v.problem,
+    duration_s: Math.max(0, ...groups.map(length)) };
+  const parts = [FORMATS[v.format] ?? v.format];
+  if (groups.length > 1) parts.push(`${groups.length} animals (${groups.join(", ")})`);
+  if (b.length > groups.length) parts.push(`${b.length} blocks`);
+  parts.push(`${b.reduce((s, x) => s + x.n_comments, 0) / Math.max(1, groups.length)} comments`);
+  info.note = `ready · ${parts.join(", ")} → ${b.length} EDF file${b.length > 1 ? "s" : ""}`;
   return info;
 }
 
-const pick = $("#pick"), drop = $("#drop");
-pick.onchange = () => { addFiles([...pick.files]); pick.value = ""; };
+// Drag and drop: files and whole folders (one level of subfolders is enough for a session).
+async function droppedEntries(dt) {
+  const roots = [...dt.items].map((i) => i.webkitGetAsEntry?.()).filter(Boolean);
+  if (!roots.length) return [...dt.files].map((file) => ({ file, folder: "" }));
+  const out = [];
+  const fileOf = (entry) => new Promise((ok, ko) => entry.file(ok, ko));
+  const children = async (dir) => {
+    const reader = dir.createReader(), all = [];
+    for (let batch; (batch = await new Promise((ok, ko) => reader.readEntries(ok, ko))).length;) all.push(...batch);
+    return all;
+  };
+  const walk = async (entry, folder) => {
+    if (entry.isFile) out.push({ file: await fileOf(entry), folder });
+    else for (const child of await children(entry)) await walk(child, entry.name);
+  };
+  for (const r of roots) await walk(r, "");
+  return out;
+}
+
+const pick = $("#pick"), pickDir = $("#pickDir"), drop = $("#drop");
+pick.onchange = () => { addInputs([...pick.files].map((file) => ({ file, folder: "" }))); pick.value = ""; };
+pickDir.onchange = () => {
+  addInputs([...pickDir.files].map((file) => ({ file, folder: file.webkitRelativePath.split("/").slice(-2, -1)[0] ?? "" })));
+  pickDir.value = "";
+};
 drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
 drop.ondragleave = () => drop.classList.remove("over");
-drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); addFiles([...e.dataTransfer.files]); };
+drop.ondrop = async (e) => { e.preventDefault(); drop.classList.remove("over"); addInputs(await droppedEntries(e.dataTransfer)); };
 
 // ---- output -----------------------------------------------------------------------------
 let outDir = null;
@@ -369,14 +414,14 @@ async function analyze(it, cfg, strict, onProgress) {
   return call("writeResults", { file: it.file, cfg, strict, parts });
 }
 
-// Files written for one input: for a .adicht, the converted EDF (if kept) and its tables per
-// block, then the event files of every block and band.
+// Files written for one input: for a vendor recording, the converted EDF (if kept) and its
+// tables per block, then the event files of every block and band.
 function plannedNames(it, bands) {
-  const edfs = it.info.adicht ? it.info.adicht.blocks.map((b) => b.edf) : [it.file.name];
+  const edfs = it.info.vendor ? it.info.vendor.blocks.map((b) => b.edf) : [it.file.name];
   const names = [];
   for (const edf of edfs) {
     const stem = edf.replace(/\.edf$/i, "");
-    if (it.info.adicht) {
+    if (it.info.vendor) {
       if ($("#saveEdf").checked) names.push(edf);
       names.push(...["events.tsv", "events.json", "channels.tsv", "recording.json"].map((x) => `${stem}_${x}`));
     }
@@ -385,7 +430,8 @@ function plannedNames(it, bands) {
   return names;
 }
 
-// All bands on one EDF ({file, info}); label prefixes the status for blocks of a .adicht.
+// All bands on one EDF ({file, info}); label prefixes the status for the EDF files of a
+// vendor recording.
 async function runBands(it, edf, bands, strict, t, label = "") {
   const counts = [];
   for (const [b, band] of bands.entries()) {
@@ -406,15 +452,17 @@ async function runBands(it, edf, bands, strict, t, label = "") {
   return counts;
 }
 
-// .adicht: convert (EDF per block on the private disk), save the tables (and the EDF), analyze.
-async function runAdicht(it, bands, strict, t) {
+// Vendor recording: convert (EDF per animal and block on the private disk), save the tables
+// (and the EDF), analyze each EDF.
+async function runVendor(it, bands, strict, t) {
   setStatus(it, "converting…");
-  const names = it.info.adicht.blocks.map((b) => b.edf);
-  const conv = await call("convertAdicht", { file: it.file, names }, (m) => {
+  const names = it.info.vendor.blocks.map((b) => b.edf);
+  const conv = await call("convertRecording", { files: it.files, folder: it.folder, name: it.info.vendor.name, names }, (m) => {
     if (m.convert) {
       const pct = Math.floor(m.convert.fraction * 100);
-      setStatus(it, `converting${names.length > 1 ? ` block ${m.convert.block}` : ""}: ${pct}%`);
-      overall.textContent = `${it.file.name}: converting ${pct}%`;
+      const which = names.length > 1 ? ` ${names[m.convert.block - 1]}` : "";
+      setStatus(it, `converting${which}: ${pct}%`);
+      overall.textContent = `${it.label}: converting${which} ${pct}%`;
     } else if (m.msg) log(`    ${m.level === "INFO" ? "" : m.level + " "}${m.msg}`);
   });
   try {
@@ -451,10 +499,10 @@ startBtn.onclick = async () => {
   for (const it of todo) {
     if (cancelled) { setStatus(it, "cancelled"); continue; }
     setStatus(it, "starting…");
-    log(`▶ ${it.file.name}`);
+    log(`▶ ${it.label}`);
     const t = performance.now();
     try {
-      const counts = it.info.adicht ? await runAdicht(it, bands, strict, t) : await runBands(it, it, bands, strict, t);
+      const counts = it.info.vendor ? await runVendor(it, bands, strict, t) : await runBands(it, it, bands, strict, t);
       setStatus(it, `✓ ${counts.join(", ")} events`, "ok");
       log(`  done in ${mmss((performance.now() - t) / 1000)}`);
       done++;

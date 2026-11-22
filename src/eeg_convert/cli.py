@@ -1,4 +1,4 @@
-"""Command line: eeg-convert FILE.adicht [...] -o OUT_DIR"""
+"""Command line: eeg-convert RECORDING [...] -o OUT_DIR (.adicht files, Neuralynx folders or .zip)"""
 
 from __future__ import annotations
 
@@ -9,12 +9,12 @@ import time
 from pathlib import Path
 
 from . import __version__
-from .convert import READERS, convert
+from .convert import ACCEPTS, convert
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="eeg-convert", description=__doc__)
-    ap.add_argument("inputs", nargs="+", help=f"recordings ({', '.join(READERS)})")
+    ap.add_argument("inputs", nargs="+", help=f"recordings ({', '.join(ACCEPTS)}) or Neuralynx session folders")
     ap.add_argument("-o", "--out-dir", help="output directory (default: next to each input)")
     ap.add_argument("--format", default="auto", help="input format (default: from the extension)")
     ap.add_argument("-v", "--verbose", action="store_true")
