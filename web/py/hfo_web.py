@@ -299,6 +299,11 @@ def run(path: str, cfg_json: str, strict: bool, out_dir: str, post, scratch=None
 
 
 # ---- LabChart .adicht: convert first, then the EDF goes through the usual path.
+# The file is read in pieces: mmap would copy it whole into WebAssembly memory (4 GB max).
+
+import eeg_convert.adicht
+
+eeg_convert.adicht.READ_IN_PIECES = True
 
 class HandleFile:
     """Writable, seekable binary file on a sync access handle (eeg_convert.edf_write)."""

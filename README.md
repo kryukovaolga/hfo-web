@@ -25,7 +25,7 @@ A `.adicht` file is converted in the page, then each part is analyzed:
 - **the comments** in a table, `<name>_events.tsv` (+ `.json` describing the columns), following the [BIDS](https://bids-specification.readthedocs.io) events format: time from the start of the file, local date and time, sample, channel, text;
 - `<name>_channels.tsv` (channels, units, sampling rate, hardware filters) and `<name>_recording.json` (exact start time, scale of each channel).
 
-Saving the EDF can be switched off (it is large: about 0.17 GB per hour with 6 channels at 4 kHz). Supported: LabChart for Windows files with recorded channels at one sampling rate; calculated channels, LabChart for Mac documents and files above about 1.85 GB (≈ 24 h with 6 channels at 4 kHz; memory limit of the browser) are refused with a message.
+Saving the EDF can be switched off (it is large: about 0.17 GB per hour with 6 channels at 4 kHz). Supported: LabChart for Windows files with recorded channels at one sampling rate; calculated channels and LabChart for Mac documents are refused with a message. The file is read in pieces, so long recordings (24 h and more) fit in the browser's memory.
 
 ## How it works
 

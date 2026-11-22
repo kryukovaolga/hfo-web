@@ -18,6 +18,10 @@ log = logging.getLogger(__name__)
 
 CACHE_BYTES = 32 << 20
 
+# Read the file in pieces (adicht_lazy) instead of mapping it whole: set by the browser
+# adapter, where memory is limited to 4 GB and mmap copies the file into memory.
+READ_IN_PIECES = False
+
 
 def _setup_float(xml: str, tag: str) -> Optional[float]:
     # values as LabChart writes them, with the PC's decimal separator: "0,3 ", "1000 "
@@ -25,11 +29,13 @@ def _setup_float(xml: str, tag: str) -> Optional[float]:
     return float(m.group(1).replace(",", ".")) if m else None
 
 
-def open_adicht(path: str | Path) -> Recording:
+def open_adicht(path: str | Path, in_pieces: Optional[bool] = None) -> Recording:
     try:
         from adichtion import AdichtFile
     except ImportError as e:
         raise ImportError("reading .adicht needs adichtion: pip install 'hfo-port[adicht]'") from e
+    if READ_IN_PIECES if in_pieces is None else in_pieces:
+        from .adicht_lazy import LazyAdichtFile as AdichtFile
 
     path = Path(path)
     # sequential reading: a large block cache only costs memory

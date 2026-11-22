@@ -196,9 +196,6 @@ function el(tag, props = {}, children = []) {
 }
 const size = (b) => (b > 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${(b / 1e6).toFixed(1)} MB`);
 const isAdicht = (file) => /\.adicht$/i.test(file.name);
-// The .adicht reader keeps about 2.1 times the file in memory (measured);
-// WebAssembly has at most 4 GB.
-const ADICHT_WARN = 1.2e9, ADICHT_MAX = 1.85e9;
 const hms = (s) => {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
   return h ? `${h} h ${m} min` : `${m} min ${Math.round(s % 60)} s`;
@@ -221,7 +218,7 @@ async function addFiles(list) {
       it.row.children[2].textContent = hms(it.info.duration_s);
       it.row.children[3].textContent = `${it.info.labels.length} · ${it.info.srate ?? "?"} Hz`;
       setStatus(it, it.info.problem ? `cannot process: ${it.info.problem}` : it.info.note ?? "ready",
-        it.info.problem ? "err" : it.info.warn ? "warn" : "");
+        it.info.problem ? "err" : "");
     } catch (e) {
       setStatus(it, `not a readable ${isAdicht(file) ? "LabChart" : "EDF"} file: ${e.message}`, "err");
     }
@@ -239,12 +236,6 @@ function adichtInfo(file, a) {
   info.note = `ready · LabChart${b.length > 1 ? `, ${b.length} blocks` : ""}, ${comments} comments`;
   if (!info.problem && b.some((x) => x.labels.join() !== first.labels.join() || x.srate !== first.srate)) {
     info.problem = "blocks with different channels or sampling rates";
-  }
-  if (!info.problem && file.size > ADICHT_MAX) {
-    info.problem = `too large for the browser (${size(file.size)}, limit ${size(ADICHT_MAX)}): use the command line (hfo-pipeline)`;
-  } else if (file.size > ADICHT_WARN) {
-    info.warn = true;
-    info.note += ` · large file: needs about ${size(2.1 * file.size)} of memory to convert`;
   }
   return info;
 }
