@@ -6,9 +6,12 @@ The validated package src/hfo_port is used as is. Browser-specific parts:
 - scratch storage for block processing: instead of memory-mapped temporary files, the
   full-length arrays go to the browser's private disk (OPFS) through sync access handles
   opened by worker.js, wrapped by hfo_port.scratch.ScratchArray (same float64 bytes);
-- progress messages for the page.
+- progress messages for the page;
+- LabChart .adicht files: converted by the validated package src/eeg_convert, the EDF
+  written to the browser's private disk (HandleFile), then analyzed like any EDF.
 
-Entry points: inspect() and run() (worker.js); config_from_yaml() (test/check.mjs).
+Entry points: inspect(), run() and the plan / run_channels / write_results trio, and
+inspect_adicht() / convert_adicht() (worker.js); config_from_yaml() (test/check.mjs).
 """
 
 from __future__ import annotations
@@ -266,7 +269,8 @@ def _run(path, cfg_json, post, scratch, processing_json):
     log = logging.getLogger("hfo_port")
     log.addHandler(handler)
     log.setLevel(logging.INFO)
-    if scratch is not None:
+    # JS null arrives as pyodide.ffi.jsnull, not None (no private disk: scratch in memory)
+    if scratch is not None and type(scratch).__name__ != "JsNull":
         blocked.Workspace.store_factory = staticmethod(
             lambda name, nbytes: HandleStore(getattr(scratch, name), nbytes))
     try:
@@ -292,6 +296,89 @@ def run(path: str, cfg_json: str, strict: bool, out_dir: str, post, scratch=None
     processing_json: overrides PROCESSING (tests).
     """
     return _write(_run(path, cfg_json, post, scratch, processing_json), path, strict, out_dir)
+
+
+# ---- LabChart .adicht: convert first, then the EDF goes through the usual path.
+
+class HandleFile:
+    """Writable, seekable binary file on a sync access handle (eeg_convert.edf_write)."""
+
+    def __init__(self, handle):
+        from js import Object  # Pyodide only
+        from pyodide.ffi import to_js
+        self.handle, self.pos = handle, 0
+        self._at = lambda offset: to_js({"at": offset}, dict_converter=Object.fromEntries)
+        handle.truncate(0)
+
+    def write(self, data) -> int:
+        from js import Uint8Array
+        data = memoryview(data).cast("B")
+        buf = Uint8Array.new(len(data))
+        buf.assign(data)
+        if self.handle.write(buf, self._at(self.pos)) != len(data):
+            raise OSError("short write to the browser's disk")
+        self.pos += len(data)
+        return len(data)
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        if whence != 0:
+            raise ValueError("only absolute seeks")
+        self.pos = offset
+        return offset
+
+    def tell(self) -> int:
+        return self.pos
+
+    def close(self) -> None:
+        self.handle.flush()
+
+    def __enter__(self) -> "HandleFile":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+
+def inspect_adicht(path: str) -> str:
+    """Blocks of a .adicht file, from its metadata only (fast)."""
+    from eeg_convert.convert import edf_stem, open_recording
+    try:
+        with open_recording(path) as rec:
+            n = len(rec.blocks)
+            blocks = [{"edf": f"{edf_stem(path, b.index, n)}.edf", "labels": [c.label for c in b.channels],
+                       "srate": b.srate, "n_samples": b.n_samples, "duration_s": b.n_samples / b.srate,
+                       "start": b.start.isoformat(sep=" ", timespec="seconds"),
+                       "n_comments": len(b.comments)} for b in rec.blocks]
+    except ValueError as e:
+        return json.dumps({"blocks": [], "problem": str(e)})
+    return json.dumps({"blocks": blocks, "problem": None if blocks else "no blocks"})
+
+
+def convert_adicht(path: str, handles, out_dir: str, post) -> str:
+    """Convert a .adicht; EDF files to handles (JS object {edf name: sync access handle}),
+    sidecars to out_dir (in-memory FS), returned as text with the EDF names."""
+    from eeg_convert.convert import convert
+    handler = _Relay(post)
+    log = logging.getLogger("eeg_convert")
+    log.addHandler(handler)
+    last = [0.0]
+
+    def progress(block, fraction):
+        now = time.monotonic()
+        if now - last[0] > 0.5 or fraction >= 1:
+            last[0] = now
+            post(json.dumps({"convert": {"block": block, "fraction": fraction}}))
+
+    try:
+        outputs = convert(path, out_dir, edf_opener=lambda p: HandleFile(getattr(handles, p.name)),
+                          progress=progress)
+    finally:
+        log.removeHandler(handler)
+    sidecars = lambda o: [o.events, o.events.with_suffix(".json"), o.channels, o.recording]
+    return json.dumps([{
+        "edf": o.edf.name, "n_comments": o.n_comments, "n_samples": o.info.n_records * o.info.record_samples,
+        "sidecars": {p.name: p.read_text(encoding="utf-8") for p in sidecars(o)},
+    } for o in outputs])
 
 
 VERSION = __version__

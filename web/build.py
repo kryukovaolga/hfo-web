@@ -4,7 +4,8 @@
     python3 web/build.py --self-host-pyodide   # Pyodide files copied into dist/pyodide/
     python3 web/build.py --serve               # build, then http://localhost:8000
 
-dist/ = static/* + hfo_port.zip (src/hfo_port and the browser adapter py/hfo_web.py)
+dist/ = static/* + hfo_port.zip (src/hfo_port, src/eeg_convert, the browser adapter
+py/hfo_web.py and the pinned .adicht reader adichtion, from its PyPI wheel checked by SHA-256)
 + user-guide.pdf (from docs/, if present, with a link in the page). Placeholders filled in
 index.html / worker.js: version, build (git commit), source URL, guide link,
 Content-Security-Policy, Pyodide location.
@@ -33,6 +34,7 @@ from pathlib import Path
 WEB = Path(__file__).resolve().parent
 ROOT = WEB.parent
 SRC = ROOT / "src" / "hfo_port"
+CONVERT = ROOT / "src" / "eeg_convert"
 GUIDE = ROOT / "docs" / "user-guide.pdf"
 DIST = WEB / "dist"
 CACHE = WEB / ".pyodide-cache"
@@ -48,6 +50,11 @@ PYODIDE_CORE = {  # SHA-256, checked against the npm package of the same version
 }
 PYODIDE_PACKAGES = ("numpy", "scipy", "pyyaml")  # with their dependencies, from the lock file
 
+# LabChart .adicht reader, pinned; pure Python. Its viewer (ui/) is left out.
+ADICHTION_WHEEL = ("adichtion-1.1.0-py3-none-any.whl",
+                   "https://files.pythonhosted.org/packages/b4/d7/d0411cfb187470e0b6a12a9c849773d6d9a11ca0ad4bbbeaff948043c9b5/",
+                   "2e968180e3fadaca259425b8996d25f2334c8b4dfe484a9d97f113642d6b20f9")
+
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -57,20 +64,20 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _fetch(name: str, sha256: str) -> Path:
-    """Download one Pyodide file into the cache (once) and check its hash."""
+def _fetch(name: str, sha256: str, base_url: str = PYODIDE_CDN) -> Path:
+    """Download one file (Pyodide's by default) into the cache (once) and check its hash."""
     CACHE.mkdir(exist_ok=True)
     path = CACHE / name
     if not path.exists() or _sha256(path) != sha256:
         print(f"  downloading {name}")
         tmp = path.with_suffix(path.suffix + ".part")
         try:
-            with urllib.request.urlopen(PYODIDE_CDN + name) as r, open(tmp, "wb") as f:
+            with urllib.request.urlopen(base_url + name) as r, open(tmp, "wb") as f:
                 shutil.copyfileobj(r, f)
         except urllib.error.URLError:
             # e.g. python.org Python on macOS without its certificates installed; the
             # hash check below makes the transport irrelevant
-            subprocess.run(["curl", "-fsSL", "-o", str(tmp), PYODIDE_CDN + name], check=True)
+            subprocess.run(["curl", "-fsSL", "-o", str(tmp), base_url + name], check=True)
         if _sha256(tmp) != sha256:
             tmp.unlink()
             raise SystemExit(f"SHA-256 mismatch for {name}: refusing to publish it")
@@ -123,7 +130,13 @@ def build(self_host: bool = False, source_url: str = "") -> Path:
     with zipfile.ZipFile(DIST / "hfo_port.zip", "w", zipfile.ZIP_DEFLATED) as z:
         for p in sorted(SRC.glob("*.py")):
             z.write(p, f"hfo_port/{p.name}")
+        for p in sorted(CONVERT.glob("*.py")):
+            z.write(p, f"eeg_convert/{p.name}")
         z.write(WEB / "py" / "hfo_web.py", "hfo_web.py")
+        with zipfile.ZipFile(_fetch(*ADICHTION_WHEEL[::2], ADICHTION_WHEEL[1])) as wheel:
+            for name in wheel.namelist():
+                if not name.startswith("adichtion/ui/"):
+                    z.writestr(name, wheel.read(name))
     if GUIDE.exists():
         shutil.copy2(GUIDE, DIST / "user-guide.pdf")
     if self_host:

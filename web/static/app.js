@@ -1,6 +1,8 @@
 // Page logic: file list, parameter form <-> config dict (same keys as the YAML config of
 // hfo-port), output folder, run queue. All computation happens in worker.js; the channels
 // of a file are shared among several workers (one Python each) to use more CPU cores.
+// LabChart .adicht files are converted first (one EDF per block, on the browser's private
+// disk), then each EDF is analyzed like a recording added by hand.
 
 const $ = (s) => document.querySelector(s);
 const form = $("#cfg");
@@ -10,7 +12,7 @@ const form = $("#cfg");
 // file headers); more are started when a file is analyzed. Cancelling terminates them all
 // (Python cannot be interrupted) and starts engines[0] again.
 class Engine {
-  constructor() {
+  constructor(clean = false) {
     this.pending = new Map();
     this.nextId = 1;
     this.worker = new Worker("worker.js", { type: "module" });
@@ -22,7 +24,7 @@ class Engine {
       this.pending.delete(data.id);
       data.error ? p.reject(new Error(data.error)) : p.resolve(data.result);
     };
-    this.ready = this.call("init");
+    this.ready = this.call("init", { clean });
   }
   call(type, payload = {}, onLog) {
     const id = this.nextId++;
@@ -40,7 +42,7 @@ class Engine {
 let engines = [];
 const call = (type, payload, onLog) => engines[0].call(type, payload, onLog);
 function startEngines() {
-  engines = [new Engine()];
+  engines = [new Engine(true)];
   return engines[0].ready;
 }
 async function useEngines(k) {
@@ -137,8 +139,8 @@ function getConfigs() {
 }
 
 // Output names: <recording>_<band name>_<low>-<high>Hz_events.txt / _summary.txt
-function outputNames(file, band) {
-  const stem = `${file.name.replace(/\.[^.]*$/, "")}_${band.name}_${band.freq[0]}-${band.freq[1]}Hz`;
+function outputNames(name, band) {
+  const stem = `${name.replace(/\.[^.]*$/, "")}_${band.name}_${band.freq[0]}-${band.freq[1]}Hz`;
   return { events: `${stem}_events.txt`, summary: `${stem}_summary.txt` };
 }
 
@@ -193,6 +195,10 @@ function el(tag, props = {}, children = []) {
   return e;
 }
 const size = (b) => (b > 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${(b / 1e6).toFixed(1)} MB`);
+const isAdicht = (file) => /\.adicht$/i.test(file.name);
+// The .adicht reader keeps about 2.1 times the file in memory (measured);
+// WebAssembly has at most 4 GB.
+const ADICHT_WARN = 1.2e9, ADICHT_MAX = 1.85e9;
 const hms = (s) => {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
   return h ? `${h} h ${m} min` : `${m} min ${Math.round(s % 60)} s`;
@@ -200,7 +206,7 @@ const hms = (s) => {
 
 async function addFiles(list) {
   for (const file of list) {
-    if (!/\.edf$/i.test(file.name) || items.some((i) => i.file.name === file.name)) continue;
+    if (!/\.(edf|adicht)$/i.test(file.name) || items.some((i) => i.file.name === file.name)) continue;
     const it = { file, info: null };
     it.status = el("td", { textContent: "reading…" });
     const rm = el("button", { type: "button", textContent: "✕", title: "Remove" });
@@ -211,17 +217,37 @@ async function addFiles(list) {
     $("#files tbody").append(it.row);
     $("#files").hidden = false;
     try {
-      it.info = await call("inspect", { file });
+      it.info = isAdicht(file) ? adichtInfo(file, await call("inspectAdicht", { file })) : await call("inspect", { file });
       it.row.children[2].textContent = hms(it.info.duration_s);
       it.row.children[3].textContent = `${it.info.labels.length} · ${it.info.srate ?? "?"} Hz`;
-      setStatus(it, it.info.problem ? `cannot process: ${it.info.problem}` : "ready", it.info.problem ? "err" : "");
+      setStatus(it, it.info.problem ? `cannot process: ${it.info.problem}` : it.info.note ?? "ready",
+        it.info.problem ? "err" : it.info.warn ? "warn" : "");
     } catch (e) {
-      setStatus(it, `not a readable EDF: ${e.message}`, "err");
+      setStatus(it, `not a readable ${isAdicht(file) ? "LabChart" : "EDF"} file: ${e.message}`, "err");
     }
     refresh();
   }
 }
 function setStatus(it, text, cls = "") { it.status.textContent = text; it.status.className = cls; }
+
+// What the list shows for a .adicht: its blocks become separate EDF files when it runs.
+function adichtInfo(file, a) {
+  const b = a.blocks, first = b[0];
+  const info = { adicht: a, labels: first?.labels ?? [], srate: first?.srate, problem: a.problem,
+    duration_s: b.reduce((s, x) => s + x.duration_s, 0) };
+  const comments = b.reduce((s, x) => s + x.n_comments, 0);
+  info.note = `ready · LabChart${b.length > 1 ? `, ${b.length} blocks` : ""}, ${comments} comments`;
+  if (!info.problem && b.some((x) => x.labels.join() !== first.labels.join() || x.srate !== first.srate)) {
+    info.problem = "blocks with different channels or sampling rates";
+  }
+  if (!info.problem && file.size > ADICHT_MAX) {
+    info.problem = `too large for the browser (${size(file.size)}, limit ${size(ADICHT_MAX)}): use the command line (hfo-pipeline)`;
+  } else if (file.size > ADICHT_WARN) {
+    info.warn = true;
+    info.note += ` · large file: needs about ${size(2.1 * file.size)} of memory to convert`;
+  }
+  return info;
+}
 
 const pick = $("#pick"), drop = $("#drop");
 pick.onchange = () => { addFiles([...pick.files]); pick.value = ""; };
@@ -243,17 +269,27 @@ $("#outPick").onclick = async () => {
 async function exists(dir, name) {
   try { await dir.getFileHandle(name); return true; } catch { return false; }
 }
-async function saveFile(name, text) {
+// data: text, or a Blob / File (a converted EDF, streamed from the private disk)
+async function saveFile(name, data) {
   if (outDir) {
     const h = await outDir.getFileHandle(name, { create: true });
     const w = await h.createWritable();
-    await w.write(text);
+    await w.write(data);
     await w.close();
     return;
   }
-  const a = el("a", { href: URL.createObjectURL(new Blob([text], { type: "text/plain" })), download: name });
+  const blob = data instanceof Blob ? data : new Blob([data], { type: "text/plain" });
+  const a = el("a", { href: URL.createObjectURL(blob), download: name });
   a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
+}
+
+async function convertedFile(dirName, name) {
+  const root = await navigator.storage.getDirectory();
+  return (await (await root.getDirectoryHandle(dirName)).getFileHandle(name)).getFile();
+}
+async function removeConverted(dirName) {
+  try { await (await navigator.storage.getDirectory()).removeEntry(dirName, { recursive: true }); } catch { /* gone */ }
 }
 
 // ---- run --------------------------------------------------------------------------------
@@ -317,7 +353,7 @@ async function workerCap(it, nChannels, notch) {
   return Math.min(k, fit);
 }
 
-// One file: plan the channels, give them out one at a time to the workers, merge.
+// One EDF ({file, info}): plan the channels, give them out one at a time to the workers, merge.
 async function analyze(it, cfg, strict, onProgress) {
   const labels = await call("plan", { file: it.file, cfg });
   const k = await workersFor(it, labels.length, cfg.notch.enabled);
@@ -342,6 +378,71 @@ async function analyze(it, cfg, strict, onProgress) {
   return call("writeResults", { file: it.file, cfg, strict, parts });
 }
 
+// Files written for one input: for a .adicht, the converted EDF (if kept) and its tables per
+// block, then the event files of every block and band.
+function plannedNames(it, bands) {
+  const edfs = it.info.adicht ? it.info.adicht.blocks.map((b) => b.edf) : [it.file.name];
+  const names = [];
+  for (const edf of edfs) {
+    const stem = edf.replace(/\.edf$/i, "");
+    if (it.info.adicht) {
+      if ($("#saveEdf").checked) names.push(edf);
+      names.push(...["events.tsv", "events.json", "channels.tsv", "recording.json"].map((x) => `${stem}_${x}`));
+    }
+    for (const band of bands) { const n = outputNames(edf, band); names.push(n.events, n.summary); }
+  }
+  return names;
+}
+
+// All bands on one EDF ({file, info}); label prefixes the status for blocks of a .adicht.
+async function runBands(it, edf, bands, strict, t, label = "") {
+  const counts = [];
+  for (const [b, band] of bands.entries()) {
+    log(`  ${label}${band.name} (${band.freq[0]}–${band.freq[1]} Hz)`);
+    const res = await analyze(edf, band.cfg, strict, (frac) => {
+      const v = Object.values(frac), part = v.reduce((x, y) => x + y, 0) / v.length;
+      const all = (b + part) / bands.length, secs = (performance.now() - t) / 1000;
+      const eta = all > 0.02 ? ` · about ${mmss(secs * (1 - all) / all)} left` : "";
+      setStatus(it, `${label}${band.name}: ${Math.floor(part * 100)}% · total ${Math.floor(all * 100)}%${eta}`);
+      overall.textContent = `${edf.file.name}: ${Math.floor(all * 100)}%${eta}`;
+    });
+    const names = outputNames(edf.file.name, band);
+    await saveFile(names.events, res.events);
+    await saveFile(names.summary, res.summary);
+    log(`    ${res.n_events} events in ${res.n_channels} channels → ${names.events}, ${names.summary}`);
+    counts.push(`${label}${band.name} ${res.n_events}`);
+  }
+  return counts;
+}
+
+// .adicht: convert (EDF per block on the private disk), save the tables (and the EDF), analyze.
+async function runAdicht(it, bands, strict, t) {
+  setStatus(it, "converting…");
+  const names = it.info.adicht.blocks.map((b) => b.edf);
+  const conv = await call("convertAdicht", { file: it.file, names }, (m) => {
+    if (m.convert) {
+      const pct = Math.floor(m.convert.fraction * 100);
+      setStatus(it, `converting${names.length > 1 ? ` block ${m.convert.block}` : ""}: ${pct}%`);
+      overall.textContent = `${it.file.name}: converting ${pct}%`;
+    } else if (m.msg) log(`    ${m.level === "INFO" ? "" : m.level + " "}${m.msg}`);
+  });
+  try {
+    log(`  converted in ${mmss((performance.now() - t) / 1000)}: ${conv.blocks.map((b) => `${b.edf} (${b.n_comments} comments)`).join(", ")}`);
+    const counts = [];
+    for (const b of conv.blocks) {
+      if (cancelled) throw new Error("cancelled");
+      const file = await convertedFile(conv.dir, b.edf);
+      for (const [name, text] of Object.entries(b.sidecars)) await saveFile(name, text);
+      if ($("#saveEdf").checked) await saveFile(b.edf, file);
+      counts.push(...await runBands(it, { file, info: { n_samples: b.n_samples } }, bands, strict, t,
+        conv.blocks.length > 1 ? `${b.edf}: ` : ""));
+    }
+    return counts;
+  } finally {
+    await removeConverted(conv.dir);
+  }
+}
+
 startBtn.onclick = async () => {
   let bands;
   try { bands = getConfigs(); } catch (e) { return alert(e.message); }
@@ -349,10 +450,7 @@ startBtn.onclick = async () => {
   const todo = items.filter((i) => i.info && !i.info.problem);
   if (outDir) {
     const clash = [];
-    for (const it of todo) for (const band of bands) {
-      const names = outputNames(it.file, band);
-      for (const n of [names.events, names.summary]) if (await exists(outDir, n)) clash.push(n);
-    }
+    for (const it of todo) for (const n of plannedNames(it, bands)) if (await exists(outDir, n)) clash.push(n);
     if (clash.length && !confirm(`These files already exist in “${outDir.name}” and will be replaced:\n\n${clash.join("\n")}`)) return;
   }
   running = true; cancelled = false; refresh();
@@ -364,23 +462,8 @@ startBtn.onclick = async () => {
     setStatus(it, "starting…");
     log(`▶ ${it.file.name}`);
     const t = performance.now();
-    const counts = [];
     try {
-      for (const [b, band] of bands.entries()) {
-        log(`  ${band.name} (${band.freq[0]}–${band.freq[1]} Hz)`);
-        const res = await analyze(it, band.cfg, strict, (frac) => {
-          const v = Object.values(frac), part = v.reduce((x, y) => x + y, 0) / v.length;
-          const all = (b + part) / bands.length, secs = (performance.now() - t) / 1000;
-          const eta = all > 0.02 ? ` · about ${mmss(secs * (1 - all) / all)} left` : "";
-          setStatus(it, `${band.name}: ${Math.floor(part * 100)}% · total ${Math.floor(all * 100)}%${eta}`);
-          overall.textContent = `${it.file.name}: ${Math.floor(all * 100)}%${eta}`;
-        });
-        const names = outputNames(it.file, band);
-        await saveFile(names.events, res.events);
-        await saveFile(names.summary, res.summary);
-        log(`    ${res.n_events} events in ${res.n_channels} channels → ${names.events}, ${names.summary}`);
-        counts.push(`${band.name} ${res.n_events}`);
-      }
+      const counts = it.info.adicht ? await runAdicht(it, bands, strict, t) : await runBands(it, it, bands, strict, t);
       setStatus(it, `✓ ${counts.join(", ")} events`, "ok");
       log(`  done in ${mmss((performance.now() - t) / 1000)}`);
       done++;

@@ -10,7 +10,7 @@
 <body>
 <header>
   <h1>HFO Detector</h1>
-  <p class="sub">Automatic HFO detection as in HFOApp: EDF in, HFOApp's two text files out for each frequency band.</p>
+  <p class="sub">Automatic HFO detection as in HFOApp: EDF in, HFOApp's two text files out for each frequency band. LabChart .adicht files are first converted to EDF, with their comments in a table.</p>
   <p class="local">🔒 Recordings are processed on this computer. They are never uploaded.</p>
   <p id="fileWarning" class="warn" hidden>This page was opened as a file. Browsers do not allow it to run the analysis that way: open it from its web address instead (for a local copy: <code>python3 web/build.py --serve</code>, then <a href="http://localhost:8000">http://localhost:8000</a>).</p>
 </header>
@@ -19,8 +19,8 @@
   <section>
     <h2><span class="n">1</span> Recordings</h2>
     <label id="drop" class="drop">
-      <input id="pick" type="file" accept=".edf,.EDF" multiple hidden>
-      <strong>Drop .edf files here</strong> or <u>choose files</u>
+      <input id="pick" type="file" accept=".edf,.EDF,.adicht" multiple hidden>
+      <strong>Drop .edf or LabChart .adicht files here</strong> or <u>choose files</u>
     </label>
     <table id="files" hidden>
       <thead><tr><th>File</th><th>Size</th><th>Length</th><th>Channels</th><th>Status</th><th></th></tr></thead>
@@ -92,6 +92,7 @@
       <button id="outPick" type="button">Choose folder…</button>
     </div>
     <p id="outNote" class="note" hidden>This browser cannot write into a chosen folder: the files go to the Downloads folder. Use Chrome or Edge to choose a folder.</p>
+    <label class="inline"><input id="saveEdf" type="checkbox" checked> Save the EDF converted from LabChart files (large: about 0.17 GB per hour with 6 channels at 4 kHz). The comments, channel and recording tables are always saved.</label>
     <div class="row">
       <button id="start" class="primary" type="button" disabled>Start</button>
       <button id="cancel" type="button" hidden>Cancel</button>

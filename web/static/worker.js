@@ -11,13 +11,17 @@ import { loadPyodide, version as PYODIDE_VERSION } from "__PYODIDE_URL__pyodide.
 // Pyodide 314.0.7: Python 3.14, numpy 2.4.6, scipy 1.18.0, PyYAML 6.0.3
 
 const SCRATCH_PREFIX = "hfo-scratch-";
+const CONVERT_PREFIX = "hfo-convert-"; // EDF files converted from .adicht, read by all workers
 
 let py = null;
 let api = null;
 let scratch = null; // {name: FileSystemSyncAccessHandle}, opened at the first run
 
-async function init() {
-  await removeOldScratch();
+async function init({ clean }) {
+  await removeOld(SCRATCH_PREFIX);
+  // converted files may be in use by the other workers: only the first worker, at page
+  // start or after a cancel, removes them
+  if (clean) await removeOld(CONVERT_PREFIX);
   py = await loadPyodide({ indexURL: "__PYODIDE_URL__" });
   await py.loadPackage(["numpy", "scipy", "pyyaml"]);
   const zip = await (await fetch("hfo_port.zip", { cache: "no-cache" })).arrayBuffer();
@@ -30,11 +34,11 @@ async function init() {
 // Scratch folders left by runs that were cancelled or crashed (a cancelled run is a
 // terminated worker, which releases its handles). Folders still in use by another tab
 // cannot be removed and are skipped.
-async function removeOldScratch() {
+async function removeOld(prefix) {
   try {
     const root = await navigator.storage.getDirectory();
     for await (const name of root.keys()) {
-      if (name.startsWith(SCRATCH_PREFIX)) {
+      if (name.startsWith(prefix)) {
         try { await root.removeEntry(name, { recursive: true }); } catch { /* in use */ }
       }
     }
@@ -71,8 +75,30 @@ function withFile(file, fn) {
   }
 }
 
+// .adicht -> one EDF per block in a new folder of the private disk (sync access handles,
+// only available in workers); the page reads them back as File objects. Sidecar tables
+// come back as text.
+async function convertAdicht({ id, file, names }) {
+  const root = await navigator.storage.getDirectory();
+  const dir = await root.getDirectoryHandle(CONVERT_PREFIX + crypto.randomUUID(), { create: true });
+  const handles = {};
+  try {
+    for (const name of names) {
+      const fh = await dir.getFileHandle(name, { create: true });
+      handles[name] = await fh.createSyncAccessHandle();
+    }
+    const post = (s) => self.postMessage({ id, log: JSON.parse(s) });
+    const blocks = JSON.parse(withFile(file, (p) => api.convert_adicht(p, handles, "/converted", post)));
+    return { dir: dir.name, blocks };
+  } finally {
+    for (const h of Object.values(handles)) h.close();
+  }
+}
+
 const handlers = {
-  init: () => init(),
+  init: ({ clean }) => init({ clean }),
+  inspectAdicht: ({ file }) => JSON.parse(withFile(file, (p) => api.inspect_adicht(p))),
+  convertAdicht,
   inspect: ({ file }) => JSON.parse(withFile(file, (p) => api.inspect(p))),
   scratchBytes: ({ n, notch }) => api.scratch_bytes(n, notch),
   plan: ({ file, cfg }) => JSON.parse(withFile(file, (p) => api.plan(p, JSON.stringify(cfg)))),
