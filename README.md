@@ -4,7 +4,7 @@
 
 > **Work in progress.** A research tool under development, not a medical device: results may change between versions, and automatic detections must be reviewed by a person. Use it at your own risk (see the warranty disclaimer in `LICENSE`).
 
-Automatic detection of high frequency oscillations (HFOs) in EEG / iEEG recordings, in the browser. Choose one or more `.edf` files, check the settings, press *Start*: for each recording and each frequency band you get two text files in the format of [HFOApp](https://www.eneuro.org/content/8/5/ENEURO.0509-20.2021), `<recording>_<band>_<low>-<high>Hz_events.txt` (one line per event) and `..._summary.txt` (counts and durations per channel).
+Automatic detection of high frequency oscillations (HFOs) in EEG / iEEG recordings, in the browser. Choose one or more `.edf` files, check the settings, press *Start*: for each recording and each frequency band you get two text files in the format of [HFOApp](https://www.eneuro.org/content/8/5/ENEURO.0509-20.2021), `<recording>_<band>_<low>-<high>Hz_events.txt` (one line per event) and `..._summary.txt` (counts and durations per channel). Each event line ends with three columns not in HFOApp's file: `Onset(s)` (seconds from the start of the file), `Duration(ms)` and `StartTime` (date and time); HFOApp's own columns keep their positions, so HFOApp can still load the file.
 
 - **Nothing to install**: made for current Chrome, Edge, Firefox and Safari, on Windows or macOS.
 - **Your recordings never leave your computer.** The page downloads only the program; the analysis runs inside the browser and the result files are saved on your computer. You can check it: once the page has loaded, disconnect from the internet — the analysis still works.

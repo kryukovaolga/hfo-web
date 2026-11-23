@@ -4,7 +4,11 @@ Differences from HFOApp, on purpose:
 - the header is written as text, not used as a printf format string, so Windows paths
   (backslashes) do not truncate it;
 - unless strict=True, a block with all parameters used is inserted before the dashed
-  separator and "Number of header lines" is updated.
+  separator and "Number of header lines" is updated;
+- unless strict=True, three columns are appended to the events table: Onset(s) (from the
+  first sample of the file), Duration(ms) ((end - start) / srate, as HFOApp's summary) and
+  StartTime (file start + onset, ms). Appended, not inserted: HFOApp reloads an events file
+  by column position (readtable, Var1..Var8, HFOApp.m:3805-3827), so the first 8 columns must not move.
 """
 
 from __future__ import annotations
@@ -84,14 +88,23 @@ def write(res: RunResult, events_path: Path, summary_path: Path, strict: bool = 
         f"{'Trial':>5}, {'Channel':>7}, {'EventLocation(sample)':>21}, {'EventType':>{max_len}}, "
         f"{'AverageFreq(Hz)':>15}, {'PeakZscore':>10}, {'NoCycles':>8}, {'BPFreq':>12}"
     ]
+    if not strict:
+        rows[0] += f", {'Onset(s)':>12}, {'Duration(ms)':>12}, {'StartTime':>23}"
     for ch in with_events:
         ev = ch.events
         for k in range(len(ev)):
-            rows.append(
+            row = (
                 f"{1:5d}, {ch.label:>7}, {num2str_int_row(ev.location[k]):>21}, {evtype:>{max_len}}, "
                 f"{_f(ev.avg_freq[k], '15.2f')}, {_f(ev.peak_zscore[k], '10.2f')}, "
                 f"{_f(ev.no_cycles[k], '8.2f')}, {ev.bpfreq[0]:6.1f} {ev.bpfreq[1]:6.1f}"
             )
+            if not strict:
+                s, e = (int(x) for x in ev.location[k])
+                onset = (s - 1) / srate  # locations are 1-based
+                clock = res.header.start + dt.timedelta(milliseconds=round(onset * 1000))
+                row += (f", {onset:12.4f}, {(e - s) / srate * 1000:12.2f}, "
+                        f"{clock.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]:>23}")
+            rows.append(row)
     events_path.write_text("\n".join(header + rows) + "\n", encoding="utf-8", newline="\n")
 
     # ---- summary file: one row per channel label that has events (labels in EDF order;
